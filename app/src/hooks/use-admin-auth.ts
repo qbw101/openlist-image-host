@@ -27,6 +27,28 @@ const getDefaultState = (): AdminAuthState => ({
   lockedUntil: 0,
 });
 
+/**
+ * 取出本机缓存的管理员凭据，拼成服务端鉴权请求头。
+ * 仅用于调用需要管理员权限的接口（写配置、测试连接）。
+ */
+export function adminAuthHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  try {
+    const cred = JSON.parse(
+      localStorage.getItem(CREDENTIAL_KEY) || "null"
+    ) as { username?: string; password?: string } | null;
+    if (cred?.username && cred?.password) {
+      headers["x-admin-username"] = cred.username;
+      headers["x-admin-password"] = cred.password;
+    }
+  } catch {
+    // ignore
+  }
+  return headers;
+}
+
 export function useAdminAuth() {
   const [state, setState] = useState<AdminAuthState>(getDefaultState);
   /** 服务端是否已初始化管理员凭据；null = 检查中，false = 需要首次设置 */

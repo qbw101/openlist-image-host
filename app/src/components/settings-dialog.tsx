@@ -30,14 +30,16 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { OpenListSettings } from "@/types";
-import { login, listFiles } from "@/lib/openlist";
+import { testConnection } from "@/lib/openlist";
 
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   settings: OpenListSettings;
-  onSave: (next: Partial<OpenListSettings>) => void;
+  onSave: (next: Partial<OpenListSettings>) => Promise<boolean>;
   isConfigured: boolean;
+  /** 服务端是否已保存过 OpenList 账号密码 */
+  hasCredential?: boolean;
   isAdmin?: boolean;
   onRequireAuth?: () => void;
 }
@@ -50,12 +52,14 @@ export function SettingsDialog({
   settings,
   onSave,
   isConfigured,
+  hasCredential = false,
   isAdmin = true,
   onRequireAuth,
 }: Props) {
   const [form, setForm] = useState<OpenListSettings>(settings);
   const [testState, setTestState] = useState<TestState>("idle");
   const [testMsg, setTestMsg] = useState("");
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -70,24 +74,30 @@ export function SettingsDialog({
     setTestState("idle");
   };
 
+  /** 账号密码留空时沿用服务端已保存的值 */
+  const credentialReady =
+    Boolean(form.username && form.password) ||
+    (!form.username && !form.password && hasCredential);
+
   const handleTest = async () => {
-    if (!form.serverUrl || !form.username || !form.password) {
+    if (!form.serverUrl || !credentialReady) {
       toast.error("请填写服务器地址、用户名和密码");
+      return;
+    }
+    if (!isAdmin) {
+      onRequireAuth?.();
+      toast.info("测试连接需要管理员验证");
       return;
     }
     setTestState("testing");
     setTestMsg("");
     try {
-      const token = await login(form.serverUrl, form.username, form.password);
-      // 尝试列出上传目录
-      await listFiles(
-        { ...form, token },
-        form.uploadPath || "/"
-      );
+      const result = await testConnection(form);
       setTestState("success");
-      setTestMsg("连接成功！");
-      // 保存 token
-      onSave({ ...form, token });
+      setTestMsg(
+        `连接成功！根目录 ${result.basePath || "/"}，发现 ${result.fileCount} 个文件` +
+          (result.sample ? `（如 ${result.sample}）` : "")
+      );
       toast.success("连接测试成功");
     } catch (e) {
       setTestState("error");
@@ -95,9 +105,17 @@ export function SettingsDialog({
     }
   };
 
-  const handleSave = () => {
-    if (!form.serverUrl || !form.username || !form.password) {
-      toast.error("请填写完整的服务器信息");
+  const handleSave = async () => {
+    if (!form.serverUrl) {
+      toast.error("请填写服务器地址");
+      return;
+    }
+    if (!form.uploadPath) {
+      toast.error("请填写上传目录路径");
+      return;
+    }
+    if (!credentialReady) {
+      toast.error("请填写 OpenList 用户名和密码");
       return;
     }
     // 未登录管理员时要求验证
@@ -106,25 +124,24 @@ export function SettingsDialog({
       toast.info("保存配置需要管理员验证");
       return;
     }
-    const toSave: Partial<OpenListSettings> = {
-      serverUrl: form.serverUrl.replace(/\/+$/, ""),
+
+    setSaving(true);
+    const ok = await onSave({
+      serverUrl: form.serverUrl.trim().replace(/\/+$/, ""),
       username: form.username,
       password: form.password,
-      uploadPath: form.uploadPath || "/images",
-      customDomain: form.customDomain.replace(/\/+$/, ""),
+      uploadPath: form.uploadPath || "/",
+      customDomain: form.customDomain.trim().replace(/\/+$/, ""),
       namingStrategy: form.namingStrategy,
-    };
-    // 如果服务器地址或密码变了，清除旧 token
-    if (
-      form.serverUrl !== settings.serverUrl ||
-      form.username !== settings.username ||
-      form.password !== settings.password
-    ) {
-      toSave.token = "";
+    });
+    setSaving(false);
+
+    if (ok) {
+      toast.success("设置已保存");
+      onOpenChange(false);
+    } else {
+      toast.error("保存失败，请确认已登录管理员");
     }
-    onSave(toSave);
-    toast.success("设置已保存");
-    onOpenChange(false);
   };
 
   return (
@@ -136,7 +153,7 @@ export function SettingsDialog({
             OpenList 服务器配置
           </DialogTitle>
           <DialogDescription>
-            配置你的 OpenList 服务器信息，用于图片上传和管理
+            配置保存在服务器本地，所有设备自动读取；账号密码仅存服务端，不会下发到浏览器
           </DialogDescription>
         </DialogHeader>
 
@@ -165,7 +182,7 @@ export function SettingsDialog({
                 用户名
               </Label>
               <Input
-                placeholder="admin"
+                placeholder={hasCredential ? "已保存，留空不改" : "imagebed"}
                 value={form.username}
                 onChange={(e) => update("username", e.target.value)}
               />
@@ -177,7 +194,7 @@ export function SettingsDialog({
               </Label>
               <Input
                 type="password"
-                placeholder="••••••••"
+                placeholder={hasCredential ? "已保存，留空不改" : "••••••••"}
                 value={form.password}
                 onChange={(e) => update("password", e.target.value)}
               />
@@ -191,12 +208,12 @@ export function SettingsDialog({
               上传目录路径
             </Label>
             <Input
-              placeholder="/images"
+              placeholder="/"
               value={form.uploadPath}
               onChange={(e) => update("uploadPath", e.target.value)}
             />
             <p className="text-xs text-muted-foreground">
-              图片上传到的目录路径，建议设置为公开访问
+              相对于该 OpenList 账号根目录的路径（账号被限制在某个目录时，此处填 <code>/</code> 即可）
             </p>
           </div>
 
@@ -212,7 +229,7 @@ export function SettingsDialog({
               onChange={(e) => update("customDomain", e.target.value)}
             />
             <p className="text-xs text-muted-foreground">
-              用于生成图片链接的域名，留空则使用服务器地址
+              仅用于生成对外分享链接；图片加载始终走本站代理
             </p>
           </div>
 
@@ -239,7 +256,7 @@ export function SettingsDialog({
           {/* 测试结果 */}
           {testState !== "idle" && (
             <div
-              className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm ${
+              className={`flex items-start gap-2 rounded-md px-3 py-2 text-sm ${
                 testState === "success"
                   ? "bg-green-500/10 text-green-600 dark:text-green-400"
                   : testState === "error"
@@ -248,23 +265,34 @@ export function SettingsDialog({
               }`}
             >
               {testState === "testing" && (
-                <Loader2 className="size-4 animate-spin" />
+                <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin" />
               )}
               {testState === "success" && (
-                <CheckCircle2 className="size-4" />
+                <CheckCircle2 className="mt-0.5 size-4 shrink-0" />
               )}
-              {testState === "error" && <XCircle className="size-4" />}
-              <span>{testState === "testing" ? "正在测试连接..." : testMsg}</span>
+              {testState === "error" && (
+                <XCircle className="mt-0.5 size-4 shrink-0" />
+              )}
+              <span className="break-all">
+                {testState === "testing" ? "正在测试连接..." : testMsg}
+              </span>
             </div>
           )}
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={handleTest} disabled={testState === "testing"}>
-            <Loader2 className={`size-4 ${testState === "testing" ? "animate-spin" : "hidden"}`} />
+          <Button
+            variant="outline"
+            onClick={handleTest}
+            disabled={testState === "testing" || saving}
+          >
+            <Loader2
+              className={`size-4 ${testState === "testing" ? "animate-spin" : "hidden"}`}
+            />
             测试连接
           </Button>
-          <Button onClick={handleSave}>
+          <Button onClick={handleSave} disabled={saving}>
+            {saving && <Loader2 className="size-4 animate-spin" />}
             {isConfigured ? "保存设置" : "保存并开始使用"}
           </Button>
         </DialogFooter>

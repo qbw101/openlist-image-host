@@ -2,7 +2,7 @@
   "serverUrl": "http://192.168.x.x:5244",
   "username": "your-openlist-username",
   "password": "your-openlist-password",
-  "uploadPath": "/images",
+  "uploadPath": "/",
   "customDomain": "",
   "namingStrategy": "original"
 }

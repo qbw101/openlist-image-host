@@ -17,10 +17,11 @@ npm run preview  # 预览构建产物
 
 | 文件 | 说明 |
 |------|------|
-| `vite.config.ts` | dev server 插件：配置存储、管理员鉴权、`/openlist/**` API 代理 |
-| `src/lib/openlist.ts` | OpenList API 封装与图片 URL 生成 |
-| `src/hooks/use-settings.ts` | 配置读写（localStorage + 服务器 config.json） |
-| `src/hooks/use-admin-auth.ts` | 管理员登录状态（服务端校验） |
+| `vite.config.ts` | dev server 插件：配置存储、管理员鉴权、OpenList 会话管理、`/openlist/**` API 代理与 `base_path` 补齐 |
+| `src/lib/openlist.ts` | OpenList API 封装与图片 URL 生成（不再持有 token） |
+| `src/hooks/use-settings.ts` | 配置读写（只读服务端脱敏配置，不缓存到 localStorage） |
+| `src/hooks/use-admin-auth.ts` | 管理员登录状态（服务端校验）与 `adminAuthHeaders()` |
 | `src/components/` | 图库、图片卡片、灯箱、设置弹窗、登录弹窗等 |
-| `public/config.example.json` | 配置模板；实际使用的 `config.json` 运行时生成且已被 gitignore |
-| `data/` | 管理员凭据（运行时生成，已被 gitignore） |
+| `data/` | 运行时生成的 `config.json`（OpenList 凭据）与 `admin-credential.json`（管理员密码哈希），已被 gitignore，且不参与静态资源服务 |
+
+配置模板见仓库根目录的 [`config.example.json`](../config.example.json)。

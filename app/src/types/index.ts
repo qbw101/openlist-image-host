@@ -2,18 +2,30 @@
 export interface OpenListSettings {
   /** 服务器地址，如 https://pan.example.com */
   serverUrl: string;
-  /** 用户名 */
+  /**
+   * OpenList 用户名。
+   * 仅作为设置表单的输入项：提交给服务端后由服务端持有，
+   * 不会随脱敏配置回传到浏览器，也不写入 localStorage。
+   */
   username: string;
-  /** 密码 */
+  /** OpenList 密码。同上，留空表示保持服务端已有值 */
   password: string;
-  /** 上传目录路径，如 /images */
+  /** 上传目录路径（账号相对路径），如 / 或 /images */
   uploadPath: string;
-  /** 自定义域名（CDN），留空则使用 serverUrl */
+  /** 自定义域名（CDN），仅用于生成分享链接 */
   customDomain: string;
-  /** 登录后缓存的 token */
-  token: string;
   /** 文件命名策略：original = 保持原名，timestamp = 时间戳命名 */
   namingStrategy: "original" | "timestamp";
+}
+
+/** 服务端返回的脱敏配置（不含账号密码） */
+export interface ServerConfig {
+  configured: boolean;
+  serverUrl: string;
+  uploadPath: string;
+  customDomain: string;
+  namingStrategy: "original" | "timestamp";
+  hasCredential: boolean;
 }
 
 /** OpenList 文件列表项 */

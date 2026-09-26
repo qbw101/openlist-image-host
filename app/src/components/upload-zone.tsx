@@ -13,9 +13,12 @@ import type { OpenListSettings, UploadTask } from "@/types";
 import {
   uploadFile,
   generateTimestampName,
-  login,
   formatSize,
+  buildFilePath,
+  getFileSign,
+  getShareUrl,
 } from "@/lib/openlist";
+import { isImageFile } from "@/types";
 
 interface Props {
   settings: OpenListSettings;
@@ -30,39 +33,28 @@ export function UploadZone({ settings, onUploaded, disabled }: Props) {
 
   const doUpload = useCallback(
     async (task: UploadTask) => {
+      const filename =
+        settings.namingStrategy === "timestamp"
+          ? generateTimestampName(task.file.name)
+          : task.file.name;
+      const filePath = buildFilePath(settings.uploadPath, filename);
+
       try {
-        // 确定文件名
-        const filename =
-          settings.namingStrategy === "timestamp"
-            ? generateTimestampName(task.file.name)
-            : task.file.name;
-        const filePath = `${settings.uploadPath}/${filename}`;
-
-        // 确保 settings 有 token
-        let currentSettings = settings;
-        if (!currentSettings.token) {
-          const token = await login(
-            settings.serverUrl,
-            settings.username,
-            settings.password
-          );
-          currentSettings = { ...settings, token };
-        }
-
-        await uploadFile(currentSettings, filePath, task.file, (loaded, total) => {
+        await uploadFile(settings, filePath, task.file, (loaded, total) => {
           const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
           setTasks((prev) =>
-            prev.map((t) =>
-              t.id === task.id ? { ...t, progress: pct } : t
-            )
+            prev.map((t) => (t.id === task.id ? { ...t, progress: pct } : t))
           );
         });
 
-        // 构造结果 URL
-        const base = (
-          currentSettings.customDomain || currentSettings.serverUrl
-        ).replace(/\/+$/, "");
-        const resultUrl = `${base}/d${filePath.startsWith("/") ? filePath : `/${filePath}`}`;
+        // OpenList 直链必须带 sign，上传后取一次签名以生成可用的分享链接
+        let resultUrl: string | undefined;
+        try {
+          const sign = await getFileSign(settings, filePath);
+          resultUrl = getShareUrl(settings, filePath, sign);
+        } catch {
+          // 取签名失败不影响上传结果，仅不显示链接
+        }
 
         setTasks((prev) =>
           prev.map((t) =>
@@ -72,69 +64,14 @@ export function UploadZone({ settings, onUploaded, disabled }: Props) {
           )
         );
       } catch (e) {
-        // 如果是认证失败，尝试重新登录后重试一次
-        const msg = e instanceof Error ? e.message : "上传失败";
-        if (msg.includes("认证失败") || msg.includes("401")) {
-          try {
-            const newToken = await login(
-              settings.serverUrl,
-              settings.username,
-              settings.password
-            );
-            const filename =
-              settings.namingStrategy === "timestamp"
-                ? generateTimestampName(task.file.name)
-                : task.file.name;
-            const filePath = `${settings.uploadPath}/${filename}`;
-
-            await uploadFile(
-              { ...settings, token: newToken },
-              filePath,
-              task.file,
-              (loaded, total) => {
-                const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
-                setTasks((prev) =>
-                  prev.map((t) =>
-                    t.id === task.id ? { ...t, progress: pct } : t
-                  )
-                );
-              }
-            );
-
-            const base = (settings.customDomain || settings.serverUrl).replace(
-              /\/+$/,
-              ""
-            );
-            const resultUrl = `${base}/d${filePath.startsWith("/") ? filePath : `/${filePath}`}`;
-
-            setTasks((prev) =>
-              prev.map((t) =>
-                t.id === task.id
-                  ? { ...t, status: "success", progress: 100, resultUrl }
-                  : t
-              )
-            );
-            return;
-          } catch (e2) {
-            setTasks((prev) =>
-              prev.map((t) =>
-                t.id === task.id
-                  ? {
-                      ...t,
-                      status: "error",
-                      error: e2 instanceof Error ? e2.message : "重试失败",
-                    }
-                  : t
-              )
-            );
-            return;
-          }
-        }
-
         setTasks((prev) =>
           prev.map((t) =>
             t.id === task.id
-              ? { ...t, status: "error", error: msg }
+              ? {
+                  ...t,
+                  status: "error",
+                  error: e instanceof Error ? e.message : "上传失败",
+                }
               : t
           )
         );
@@ -145,13 +82,7 @@ export function UploadZone({ settings, onUploaded, disabled }: Props) {
 
   const handleFiles = useCallback(
     async (files: FileList | File[]) => {
-      const fileArr = Array.from(files).filter((f) => {
-        const ext = f.name.toLowerCase().match(/\.[^.]+$/)?.[0] ?? "";
-        return [
-          ".jpg", ".jpeg", ".png", ".gif", ".webp",
-          ".svg", ".bmp", ".ico", ".avif",
-        ].includes(ext);
-      });
+      const fileArr = Array.from(files).filter((f) => isImageFile(f.name));
 
       if (fileArr.length === 0) {
         toast.error("请选择图片文件（JPG/PNG/GIF/WebP/SVG/BMP/AVIF）");
@@ -210,9 +141,28 @@ export function UploadZone({ settings, onUploaded, disabled }: Props) {
     setTasks((prev) => prev.filter((t) => t.id !== id));
   };
 
-  const copyUrl = (url: string) => {
-    navigator.clipboard.writeText(url);
-    toast.success("链接已复制");
+  /** HTTP 环境下 navigator.clipboard 不可用，回退到 execCommand */
+  const copyUrl = async (url: string) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      toast.success("链接已复制");
+      return;
+    } catch {
+      // fallthrough
+    }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = url;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      toast.success("链接已复制");
+    } catch {
+      toast.error("复制失败，请手动复制");
+    }
   };
 
   return (
@@ -289,7 +239,7 @@ export function UploadZone({ settings, onUploaded, disabled }: Props) {
                 {task.status === "uploading" && (
                   <Progress value={task.progress} className="mt-1.5 h-1.5" />
                 )}
-                {task.status === "success" && (
+                {task.status === "success" && task.resultUrl && (
                   <div className="mt-1 flex items-center gap-2">
                     <code className="truncate rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
                       {task.resultUrl}

@@ -1,107 +1,100 @@
 import { useCallback, useEffect, useState } from "react";
-import type { OpenListSettings } from "@/types";
-import { CREDENTIAL_KEY } from "@/hooks/use-admin-auth";
-
-const STORAGE_KEY = "openlist-image-host-settings";
+import type { OpenListSettings, ServerConfig } from "@/types";
+import { adminAuthHeaders } from "@/hooks/use-admin-auth";
 
 const DEFAULT_SETTINGS: OpenListSettings = {
   serverUrl: "",
   username: "",
   password: "",
-  uploadPath: "/images",
+  uploadPath: "/",
   customDomain: "",
-  token: "",
   namingStrategy: "timestamp",
 };
 
 export function useSettings() {
   const [settings, setSettings] = useState<OpenListSettings>(DEFAULT_SETTINGS);
+  const [isConfigured, setIsConfigured] = useState(false);
+  const [hasCredential, setHasCredential] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
-  useEffect(() => {
-    // 1. 优先从 localStorage 读取（本地缓存）
-    let localSettings: OpenListSettings | null = null;
+  /**
+   * 从服务端读取脱敏配置。
+   * 刻意不使用 localStorage 缓存：配置以服务端为唯一真相来源，
+   * 否则换了配置后旧设备的本地缓存会一直生效。
+   */
+  const reload = useCallback(async () => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed && parsed.serverUrl) {
-          localSettings = { ...DEFAULT_SETTINGS, ...parsed };
-        }
-      }
+      const res = await fetch("/api/config", { cache: "no-store" });
+      const cfg = (await res.json()) as ServerConfig;
+      setIsConfigured(Boolean(cfg?.configured));
+      setHasCredential(Boolean(cfg?.hasCredential));
+      setSettings((prev) => ({
+        ...prev,
+        serverUrl: cfg?.serverUrl ?? "",
+        uploadPath: cfg?.uploadPath ?? "/",
+        customDomain: cfg?.customDomain ?? "",
+        namingStrategy: cfg?.namingStrategy === "original" ? "original" : "timestamp",
+      }));
     } catch {
-      // ignore
-    }
-
-    if (localSettings) {
-      setSettings(localSettings);
+      setIsConfigured(false);
+    } finally {
       setLoaded(true);
-      return;
     }
-
-    // 2. localStorage 为空，从服务器 config.json 加载
-    fetch("./config.json")
-      .then((res) => {
-        if (!res.ok) throw new Error("not found");
-        return res.json();
-      })
-      .then((cfg) => {
-        if (cfg && cfg.serverUrl) {
-          const remote: OpenListSettings = { ...DEFAULT_SETTINGS, ...cfg };
-          setSettings(remote);
-          try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(remote));
-          } catch {
-            // ignore
-          }
-        }
-      })
-      .catch(() => {
-        // config.json 不存在或格式错误，忽略
-      })
-      .finally(() => setLoaded(true));
   }, []);
 
-  const saveSettings = useCallback((next: Partial<OpenListSettings>) => {
-    setSettings((prev) => {
-      const merged = { ...prev, ...next };
-      // 写入 localStorage（本地缓存）
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
-      } catch {
-        // ignore
-      }
-      // 同步写入服务器 config.json（不含 token，token 由各设备自行获取）
-      const { token: _token, ...configForServer } = merged;
-      // 附带管理员凭据，服务端校验后才允许写入
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  /**
+   * 保存配置到服务端（需管理员权限）。
+   * username / password 留空表示保持服务端已有值。
+   */
+  const saveSettings = useCallback(
+    async (next: Partial<OpenListSettings>): Promise<boolean> => {
+      setSettings((prev) => ({ ...prev, ...next }));
+
+      const payload: Record<string, unknown> = {
+        serverUrl: next.serverUrl,
+        uploadPath: next.uploadPath,
+        customDomain: next.customDomain,
+        namingStrategy: next.namingStrategy,
       };
-      try {
-        const cred = JSON.parse(
-          localStorage.getItem(CREDENTIAL_KEY) || "null"
-        ) as { username?: string; password?: string } | null;
-        if (cred?.username && cred?.password) {
-          headers["x-admin-username"] = cred.username;
-          headers["x-admin-password"] = cred.password;
-        }
-      } catch {
-        // ignore
-      }
-      fetch("/api/config", {
-        method: "POST",
-        headers,
-        body: JSON.stringify(configForServer),
-      }).catch(() => {
-        // 写入服务器失败不阻塞本地保存
-      });
-      return merged;
-    });
-  }, []);
+      if (next.username) payload.username = next.username;
+      if (next.password) payload.password = next.password;
 
-  const isConfigured = Boolean(
-    settings.serverUrl && settings.username && settings.password && settings.uploadPath
+      try {
+        const res = await fetch("/api/config", {
+          method: "POST",
+          headers: adminAuthHeaders(),
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.ok) return false;
+
+        const cfg = data.config as ServerConfig | undefined;
+        if (cfg) {
+          setIsConfigured(Boolean(cfg.configured));
+          setHasCredential(Boolean(cfg.hasCredential));
+          setSettings((prev) => ({
+            ...prev,
+            serverUrl: cfg.serverUrl ?? prev.serverUrl,
+            uploadPath: cfg.uploadPath ?? prev.uploadPath,
+            customDomain: cfg.customDomain ?? prev.customDomain,
+            namingStrategy:
+              cfg.namingStrategy === "original" ? "original" : "timestamp",
+            // 凭据只留在服务端，清掉表单里的明文
+            username: "",
+            password: "",
+          }));
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    []
   );
 
-  return { settings, saveSettings, isConfigured, loaded };
+  return { settings, saveSettings, isConfigured, hasCredential, loaded, reload };
 }

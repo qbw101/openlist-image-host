@@ -21,12 +21,12 @@ import { ImageLightbox } from "@/components/image-lightbox";
 import { useAdminAuth } from "@/hooks/use-admin-auth";
 import { useSettings } from "@/hooks/use-settings";
 import { AdminLoginDialog } from "@/components/admin-login-dialog";
-import { listImages, deleteFiles, login } from "@/lib/openlist";
+import { listImages, deleteFiles } from "@/lib/openlist";
 import type { ImageItem } from "@/types";
 import "./App.css";
 
 function AppContent() {
-  const { settings, saveSettings, isConfigured, loaded } = useSettings();
+  const { settings, saveSettings, isConfigured, hasCredential, loaded } = useSettings();
   const {
     isLoggedIn: isAdmin,
     serverInitialized,
@@ -59,62 +59,20 @@ function AppContent() {
     }
   }, [serverInitialized]);
 
-  // 带认证的 API 调用包装
-  const withAuth = useCallback(
-    async <T,>(fn: (s: typeof settings) => Promise<T>): Promise<T> => {
-      try {
-        return await fn(settings);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : "";
-        if (msg.includes("401") || msg.includes("认证") || msg.includes("unauthorized")) {
-          const token = await login(
-            settings.serverUrl,
-            settings.username,
-            settings.password
-          );
-          saveSettings({ token });
-          return await fn({ ...settings, token });
-        }
-        throw e;
-      }
-    },
-    [settings, saveSettings]
-  );
-
-  // 加载图片列表
+  // 加载图片列表（OpenList 鉴权由服务端代理处理，前端不持有 token）
   const loadImages = useCallback(async () => {
     if (!isConfigured) return;
     setLoading(true);
     setError(null);
     try {
-      // 如果没有 token，先登录
-      let s = settings;
-      if (!s.token) {
-        const token = await login(s.serverUrl, s.username, s.password);
-        s = { ...s, token };
-        saveSettings({ token });
-      }
-      const imgs = await listImages(s);
+      const imgs = await listImages(settings);
       setImages(imgs);
     } catch (e) {
-      // 尝试重新登录
-      try {
-        const token = await login(
-          settings.serverUrl,
-          settings.username,
-          settings.password
-        );
-        saveSettings({ token });
-        const imgs = await listImages({ ...settings, token });
-        setImages(imgs);
-      } catch (e2) {
-        const msg = e2 instanceof Error ? e2.message : "加载图片列表失败";
-        setError(msg);
-      }
+      setError(e instanceof Error ? e.message : "加载图片列表失败");
     } finally {
       setLoading(false);
     }
-  }, [isConfigured, settings, saveSettings]);
+  }, [isConfigured, settings]);
 
   // 配置好后自动加载
   useEffect(() => {
@@ -128,9 +86,7 @@ function AppContent() {
     if (!deleteTarget) return;
     setDeleting(true);
     try {
-      await withAuth((s) =>
-        deleteFiles(s, settings.uploadPath, [deleteTarget.name])
-      );
+      await deleteFiles(settings, settings.uploadPath, [deleteTarget.name]);
       setImages((prev) => prev.filter((i) => i.path !== deleteTarget.path));
       toast.success("图片已删除");
     } catch (e) {
@@ -312,6 +268,7 @@ function AppContent() {
         settings={settings}
         onSave={saveSettings}
         isConfigured={isConfigured}
+        hasCredential={hasCredential}
         isAdmin={isAdmin}
         onRequireAuth={() => {
           setSettingsOpen(false);
