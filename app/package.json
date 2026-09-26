@@ -1,7 +1,9 @@
 {
-  "name": "my-app",
+  "name": "openlist-image-host",
   "private": true,
   "version": "0.0.0",
+  "description": "基于 OpenList Web API 的图床前端",
+  "license": "GPL-3.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

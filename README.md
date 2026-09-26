@@ -79,3 +79,21 @@ npm run dev
 ## 说明
 
 - dev server 同时承担后端职责（配置存储 / 鉴权 / 代理），生产环境请以 `vite preview` 或自建 Node 服务加载同一份 `vite.config.ts` 插件。
+
+## 许可
+
+本项目采用 **GNU General Public License v3.0** 许可，详见 [LICENSE](./LICENSE)。
+
+```
+Copyright (C) 2026 仇博文 (qbw101)
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+```
