@@ -1,73 +1,26 @@
-# React + TypeScript + Vite
+# app — OpenList 图床前端
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+本目录是图床的前端工程（React 19 + TypeScript + Vite 7 + Tailwind CSS v3 + shadcn/ui）。
 
-Currently, two official plugins are available:
+项目完整说明、配置流程与安全须知见仓库根目录的 [`README.md`](../README.md)。
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## 常用命令
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install      # 安装依赖
+npm run dev      # 启动开发服务器（默认 6173 端口）
+npm run build    # 构建生产产物到 dist/
+npm run preview  # 预览构建产物
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## 关键文件
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+| 文件 | 说明 |
+|------|------|
+| `vite.config.ts` | dev server 插件：配置存储、管理员鉴权、`/openlist/**` API 代理 |
+| `src/lib/openlist.ts` | OpenList API 封装与图片 URL 生成 |
+| `src/hooks/use-settings.ts` | 配置读写（localStorage + 服务器 config.json） |
+| `src/hooks/use-admin-auth.ts` | 管理员登录状态（服务端校验） |
+| `src/components/` | 图库、图片卡片、灯箱、设置弹窗、登录弹窗等 |
+| `public/config.example.json` | 配置模板；实际使用的 `config.json` 运行时生成且已被 gitignore |
+| `data/` | 管理员凭据（运行时生成，已被 gitignore） |
