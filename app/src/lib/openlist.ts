@@ -181,13 +181,15 @@ export async function makeDir(
 }
 
 /**
- * 构造代理 URL（始终走服务器代理，用于图片加载/预览）
- * 服务端会补上账号 base_path 前缀，前端只需给「账号相对路径」。
+ * 构造代理 URL（始终走服务器代理，用于图片加载/预览）。
+ *
+ * 服务端会补上账号 base_path 前缀、并用当前 token 现取签名，
+ * 因此前端只给「账号相对路径」即可，URL 里不需要也不应该带 sign
+ * —— 客户端签发的 sign 会随 token 轮换失效，那正是图片突然 401 的原因。
  */
-export function getDirectUrl(filePath: string, sign = ""): string {
+export function getDirectUrl(filePath: string): string {
   const p = encodeUrlPath(filePath);
-  const signParam = sign ? `?sign=${encodeURIComponent(sign)}` : "";
-  return `/openlist/d${p}${signParam}`;
+  return `/openlist/d${p}`;
 }
 
 /**
@@ -199,8 +201,8 @@ export function buildFilePath(uploadPath: string, filename: string): string {
 }
 
 /**
- * 取单个文件的签名（OpenList 的 /d/ 直链必须带 sign）。
- * 用于上传完成后立刻生成可用的复制链接。
+ * 取单个文件的签名（保留给需要自行透传 sign 的场景）。
+ * 注意：正常加载图片不需要它，代理会自动注入有效签名。
  */
 export async function getFileSign(
   _settings: OpenListSettings,
@@ -218,20 +220,17 @@ export async function getFileSign(
 }
 
 /**
- * 构造分享 URL（用于复制到 Markdown/HTML 等外部页面）
- * 分享地址必须是绝对公网 URL，并始终通过本站 /openlist 代理读取图片。
+ * 构造分享 URL（用于复制到 Markdown/HTML 等外部页面）。
+ *
+ * 不带 sign：链接是「纯路径」，由本站代理在服务端注入有效签名。
+ * 这样链接永久有效，不会因为 OpenList token 轮换而集体失效。
  */
-export function getShareUrl(
-  settings: OpenListSettings,
-  filePath: string,
-  sign = ""
-): string {
+export function getShareUrl(settings: OpenListSettings, filePath: string): string {
   const p = encodeUrlPath(filePath);
-  const signParam = sign ? `?sign=${encodeURIComponent(sign)}` : "";
   const origin = settings.customDomain
     ? normalizeServerUrl(settings.customDomain)
     : window.location.origin;
-  return `${origin}/openlist/d${p}${signParam}`;
+  return `${origin}/openlist/d${p}`;
 }
 
 /**
@@ -254,9 +253,9 @@ export async function listImages(settings: OpenListSettings): Promise<ImageItem[
         name: f.name,
         size: f.size,
         modified: f.modified,
-        url: getDirectUrl(fullPath, f.sign),
-        thumb: getDirectUrl(fullPath, f.sign),
-        shareUrl: getShareUrl(settings, fullPath, f.sign),
+        url: getDirectUrl(fullPath),
+        thumb: getDirectUrl(fullPath),
+        shareUrl: getShareUrl(settings, fullPath),
         path: fullPath,
       } as ImageItem;
     })

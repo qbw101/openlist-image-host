@@ -15,7 +15,6 @@ import {
   generateTimestampName,
   formatSize,
   buildFilePath,
-  getFileSign,
   getShareUrl,
 } from "@/lib/openlist";
 import { isImageFile } from "@/types";
@@ -47,14 +46,8 @@ export function UploadZone({ settings, onUploaded, disabled }: Props) {
           );
         });
 
-        // OpenList 直链必须带 sign，上传后取一次签名以生成可用的分享链接
-        let resultUrl: string | undefined;
-        try {
-          const sign = await getFileSign(settings, filePath);
-          resultUrl = getShareUrl(settings, filePath, sign);
-        } catch {
-          // 取签名失败不影响上传结果，仅不显示链接
-        }
+        // 分享链接不带签名：由服务端代理注入有效签名，链接永久有效
+        const resultUrl = getShareUrl(settings, filePath);
 
         setTasks((prev) =>
           prev.map((t) =>

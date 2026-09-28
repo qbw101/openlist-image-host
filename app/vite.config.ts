@@ -46,6 +46,20 @@ const session = {
   basePathFor: "",
 }
 
+/**
+ * 直链签名（sign）缓存。
+ *
+ * OpenList 的 /d/、/p/ 直链必须带 sign，而 sign 由「文件路径 + 签发时的 token」派生：
+ * token 一旦轮换（OpenList 重启 / token 过期 / 更换账号 / 改密码），
+ * 此前签发过的所有 sign 立即失效并返回 401 —— 这正是「图片加载失败」的根因，
+ * 也是已经复制到 Markdown 里的老链接会突然挂掉的原因。
+ *
+ * 因此代理层不再信任客户端带来的 sign，而是统一用「当前 token 现取现用」，
+ * 并按 (token, 账号相对路径) 缓存；token 变了 key 就变，自然淘汰旧值。
+ */
+const signCache = new Map<string, string>()
+const signInflight = new Map<string, Promise<string>>()
+
 const trimSlash = (s: string) => s.replace(/\/+$/, "")
 
 /** 账号根目录："/" 或 "" 视为无前缀 */
@@ -90,6 +104,7 @@ function resetSession() {
   session.token = ""
   session.basePath = ""
   session.basePathFor = ""
+  signCache.clear()
 }
 
 // ---------------------------------------------------------------- 管理员凭据
@@ -210,6 +225,96 @@ function encodePathSegments(p: string): string {
   return p.split("/").map(encodeURIComponent).join("/")
 }
 
+/** 逐段解码（失败则原样保留），用于把 URL 里的编码路径还原成真实路径 */
+function decodePathSegments(p: string): string {
+  return p
+    .split("/")
+    .map((seg) => {
+      try {
+        return decodeURIComponent(seg)
+      } catch {
+        return seg
+      }
+    })
+    .join("/")
+}
+
+/** 目录 + 文件名 → 账号相对路径 */
+function joinFsPath(dir: string, name: string): string {
+  const d = dir && dir !== "/" ? trimSlash(dir) : ""
+  return `${d}/${name}`
+}
+
+const signKey = (token: string, accountPath: string) => `${token}\n${accountPath}`
+
+/**
+ * 用当前 token 现取一个有效签名（并发去重 + 按 token 缓存）。
+ * path 必须是「账号相对路径」，与 fs/get 的入参一致。
+ */
+async function fetchSign(cfg: StoredConfig, token: string, accountPath: string): Promise<string> {
+  const key = signKey(token, accountPath)
+  const hit = signCache.get(key)
+  if (hit) return hit
+
+  let inflight = signInflight.get(key)
+  if (!inflight) {
+    inflight = (async () => {
+      const serverUrl = trimSlash(cfg.serverUrl || "")
+      const res = await fetch(`${serverUrl}/api/fs/get`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: token },
+        body: JSON.stringify({ path: accountPath, password: "" }),
+      })
+      const data = (await res.json().catch(() => null)) as
+        | { code?: number; message?: string; data?: { sign?: string } }
+        | null
+      const sign = data?.data?.sign
+      if (!sign) {
+        const err = new Error(data?.message || `HTTP ${res.status}`) as Error & {
+          upstreamStatus?: number
+        }
+        // 上游是 200 + 业务错误码（如「object not found」）= 文件不存在 → 404；
+        // 其余（连不上、鉴权失败等）→ 502
+        err.upstreamStatus = res.status === 200 && data?.code ? 404 : 502
+        throw err
+      }
+      signCache.set(key, sign)
+      return sign
+    })()
+    signInflight.set(key, inflight)
+    inflight.catch(() => undefined).finally(() => signInflight.delete(key))
+  }
+  return inflight
+}
+
+/**
+ * 顺手从 fs/list、fs/get 的响应里收割每个文件的签名。
+ * fs/list 已经返回了每个条目的 sign，提前收下就能省掉后续逐张 fs/get 的往返。
+ */
+function harvestSigns(token: string, apiPath: string, body: unknown, json: unknown) {
+  try {
+    const reqPathRaw = (body as { path?: unknown } | null)?.path
+    const reqPath = typeof reqPathRaw === "string" && reqPathRaw ? reqPathRaw : "/"
+    const data = (json as { data?: Record<string, unknown> } | null)?.data
+    if (!data) return
+
+    if (apiPath.endsWith("/fs/list")) {
+      const content = data.content
+      if (Array.isArray(content)) {
+        for (const f of content as Array<Record<string, unknown>>) {
+          if (f && !f.is_dir && f.name && f.sign) {
+            signCache.set(signKey(token, joinFsPath(reqPath, String(f.name))), String(f.sign))
+          }
+        }
+      }
+    } else if (apiPath.endsWith("/fs/get")) {
+      if (data.sign) signCache.set(signKey(token, reqPath), String(data.sign))
+    }
+  } catch {
+    /* 收割失败不影响主流程 */
+  }
+}
+
 async function proxyOpenList(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const cfg = readConfig()
   const serverUrl = trimSlash(cfg?.serverUrl || "")
@@ -218,22 +323,28 @@ async function proxyOpenList(req: http.IncomingMessage, res: http.ServerResponse
     return
   }
 
-  // 剥掉 /openlist 前缀，再拆出 path 与 query（query 内含 sign，必须原样保留）
+  // 剥掉 /openlist 前缀，再拆出 path 与 query
   const raw = (req.url || "/").replace(/^\/openlist/, "") || "/"
   const qIndex = raw.indexOf("?")
   const pathOnly = qIndex >= 0 ? raw.slice(0, qIndex) : raw
-  const query = qIndex >= 0 ? raw.slice(qIndex) : ""
+  const rawQuery = qIndex >= 0 ? raw.slice(qIndex + 1) : ""
 
-  // /d/ 与 /p/ 是直链接口，需要补 base_path 前缀；其余为 API，走 token
+  // /d/ 与 /p/ 是直链接口，需要补 base_path 前缀并注入有效签名；其余为 API，走 token
   const directMatch = pathOnly.match(/^\/(d|p)(\/.*)?$/)
   const isDirect = Boolean(directMatch)
 
-  // 非直链且带 body：小体积先缓冲（便于 token 失效时重试）
+  // 非直链且带 body：小体积先缓冲（便于 token 失效时重试 / 收割签名）
   let bodyBuf: Buffer | null = null
+  let bodyJson: unknown = null
   if (!isDirect && req.method !== "GET" && req.method !== "HEAD") {
     const len = Number(req.headers["content-length"] || 0)
     if (!len || len <= MAX_BUFFER) {
       bodyBuf = await readAll(req)
+      try {
+        bodyJson = JSON.parse(bodyBuf.toString("utf-8"))
+      } catch {
+        bodyJson = null
+      }
     }
   }
 
@@ -248,12 +359,38 @@ async function proxyOpenList(req: http.IncomingMessage, res: http.ServerResponse
       return
     }
 
-    let upstreamPath = pathOnly
+    let upstreamPath: string
     if (isDirect) {
+      const kind = directMatch![1]
       const basePath = await ensureBasePath(cfg as StoredConfig, token)
-      upstreamPath = `/${directMatch![1]}${encodePathSegments(basePath)}${directMatch![2] ?? ""}`
+
+      // 客户端传的是「账号相对路径」（/a.png）；同时兼容已经带了 base_path 的全局路径（/图床/a.png）
+      const reqFull = decodePathSegments(directMatch![2] ?? "/")
+      let accountPath = reqFull
+      if (basePath && (reqFull === basePath || reqFull.startsWith(`${basePath}/`))) {
+        accountPath = reqFull.slice(basePath.length) || "/"
+      }
+      if (!accountPath.startsWith("/")) accountPath = `/${accountPath}`
+      const globalPath = `${basePath}${accountPath}`
+
+      // ★ 关键修复：忽略客户端携带的 sign。
+      //   它绑定的是签发时的 token，token 轮换后必然 401（表现为「图片加载失败」）。
+      //   这里改用当前 token 现取一个有效签名，因此老链接、无 sign 的链接都能继续用。
+      let sign = ""
+      try {
+        sign = await fetchSign(cfg as StoredConfig, token, accountPath)
+      } catch (e) {
+        const status = (e as Error & { upstreamStatus?: number }).upstreamStatus ?? 502
+        sendJson(res, status, { code: status, message: `获取图片签名失败：${(e as Error).message}` })
+        return
+      }
+      const sp = new URLSearchParams(rawQuery)
+      sp.delete("sign")
+      sp.set("sign", sign)
+      upstreamPath = `/${kind}${encodePathSegments(globalPath)}?${sp.toString()}`
+    } else {
+      upstreamPath = pathOnly + (rawQuery ? `?${rawQuery}` : "")
     }
-    upstreamPath += query
 
     const u = new URL(serverUrl)
     const isHttps = u.protocol === "https:"
@@ -265,6 +402,8 @@ async function proxyOpenList(req: http.IncomingMessage, res: http.ServerResponse
       delete headers.authorization
     } else {
       headers.authorization = token
+      // 关闭压缩：接口响应体都很小，原样缓冲便于解析/收割签名
+      headers["accept-encoding"] = "identity"
     }
 
     const options: http.RequestOptions = {
@@ -279,10 +418,11 @@ async function proxyOpenList(req: http.IncomingMessage, res: http.ServerResponse
     const outcome = await new Promise<{ retry: boolean }>((resolve) => {
       const preq = lib.request(options, (pres) => {
         const status = pres.statusCode || 502
+        const ctype = String(pres.headers["content-type"] || "")
 
-        // token 过期：清缓存后重试一次（仅限已缓冲 body 或 GET/HEAD）
+        // token 过期 / 签名失效：清空会话后重试一次（直链同样适用）
         const canRetry =
-          !isDirect && status === 401 && attempt === 0 &&
+          status === 401 && attempt === 0 &&
           (bodyBuf !== null || req.method === "GET" || req.method === "HEAD")
         if (canRetry) {
           pres.resume()
@@ -294,7 +434,7 @@ async function proxyOpenList(req: http.IncomingMessage, res: http.ServerResponse
 
         // OpenList 对未知路径会回退到 SPA 首页并返回 200 + HTML。
         // 接口请求拿到 HTML 说明上游路径没对上，转成明确错误，避免把网页丢给前端解析。
-        if (!isDirect && String(outHeaders["content-type"] || "").startsWith("text/html")) {
+        if (!isDirect && ctype.startsWith("text/html")) {
           pres.resume()
           sendJson(res, 502, {
             code: 502,
@@ -305,10 +445,36 @@ async function proxyOpenList(req: http.IncomingMessage, res: http.ServerResponse
         }
 
         // 图片经代理时内联展示，避免 Markdown 渲染器按附件处理
-        if (isDirect && String(outHeaders["content-type"] || "").startsWith("image/")) {
+        if (isDirect && ctype.startsWith("image/")) {
           outHeaders["content-disposition"] = "inline"
           outHeaders["x-content-type-options"] = "nosniff"
         }
+
+        // 小体积 JSON 响应先缓冲，用来收割签名（失败也只是回退成普通转发）
+        const clen = Number(pres.headers["content-length"] || 0)
+        const canHarvest =
+          !isDirect && req.method === "POST" &&
+          ctype.startsWith("application/json") && clen > 0 && clen <= MAX_BUFFER
+        if (canHarvest) {
+          const chunks: Buffer[] = []
+          pres.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)))
+          pres.on("end", () => {
+            const buf = Buffer.concat(chunks)
+            try {
+              harvestSigns(token, pathOnly, bodyJson, JSON.parse(buf.toString("utf-8")))
+            } catch {
+              /* 忽略 */
+            }
+            if (!res.headersSent) res.writeHead(status, outHeaders)
+            res.end(buf)
+          })
+          pres.on("error", () => {
+            if (!res.headersSent) res.destroy()
+          })
+          resolve({ retry: false })
+          return
+        }
+
         res.writeHead(status, outHeaders)
         pres.pipe(res)
         resolve({ retry: false })
