@@ -272,10 +272,17 @@ async function fetchSign(cfg: StoredConfig, token: string, accountPath: string):
       if (!sign) {
         const err = new Error(data?.message || `HTTP ${res.status}`) as Error & {
           upstreamStatus?: number
+          authFailed?: boolean
         }
-        // 上游是 200 + 业务错误码（如「object not found」）= 文件不存在 → 404；
-        // 其余（连不上、鉴权失败等）→ 502
-        err.upstreamStatus = res.status === 200 && data?.code ? 404 : 502
+        // OpenList 的 token 失效表现为 HTTP 200 + {"code":401,"message":"token is expired"}
+        err.authFailed = res.status === 401 || data?.code === 401
+        // 上游 200 + 业务错误码（如「object not found」）= 文件不存在 → 404；其余 → 502
+        err.upstreamStatus =
+          data?.code === 401 || res.status === 401
+            ? 502
+            : res.status === 200 && data?.code
+              ? 404
+              : 502
         throw err
       }
       signCache.set(key, sign)
@@ -380,8 +387,14 @@ async function proxyOpenList(req: http.IncomingMessage, res: http.ServerResponse
       try {
         sign = await fetchSign(cfg as StoredConfig, token, accountPath)
       } catch (e) {
-        const status = (e as Error & { upstreamStatus?: number }).upstreamStatus ?? 502
-        sendJson(res, status, { code: status, message: `获取图片签名失败：${(e as Error).message}` })
+        const err = e as Error & { upstreamStatus?: number; authFailed?: boolean }
+        // token 过期导致取签失败：重登一次再来（否则图片会一路 404/502）
+        if (err.authFailed && attempt === 0) {
+          resetSession()
+          continue
+        }
+        const status = err.upstreamStatus ?? 502
+        sendJson(res, status, { code: status, message: `获取图片签名失败：${err.message}` })
         return
       }
       const sp = new URLSearchParams(rawQuery)
@@ -420,11 +433,11 @@ async function proxyOpenList(req: http.IncomingMessage, res: http.ServerResponse
         const status = pres.statusCode || 502
         const ctype = String(pres.headers["content-type"] || "")
 
-        // token 过期 / 签名失效：清空会话后重试一次（直链同样适用）
-        const canRetry =
+        // ① HTTP 层 401：token 失效，清会话后重登重试
+        const httpAuthFail =
           status === 401 && attempt === 0 &&
           (bodyBuf !== null || req.method === "GET" || req.method === "HEAD")
-        if (canRetry) {
+        if (httpAuthFail) {
           pres.resume()
           resolve({ retry: true })
           return
@@ -450,34 +463,49 @@ async function proxyOpenList(req: http.IncomingMessage, res: http.ServerResponse
           outHeaders["x-content-type-options"] = "nosniff"
         }
 
-        // 小体积 JSON 响应先缓冲，用来收割签名（失败也只是回退成普通转发）
+        // 非直链的 JSON 响应一律先缓冲：既要收割签名，也要识别
+        // ② OpenList 特有的「伪 200」——token 过期时它返回 HTTP 200 +
+        //    {"code":401,"message":"token is expired"}，只看状态码会漏掉，
+        //    结果前端拿到这条错误直接显示「加载失败」。这里必须解包判断。
         const clen = Number(pres.headers["content-length"] || 0)
-        const canHarvest =
-          !isDirect && req.method === "POST" &&
-          ctype.startsWith("application/json") && clen > 0 && clen <= MAX_BUFFER
-        if (canHarvest) {
-          const chunks: Buffer[] = []
-          pres.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)))
-          pres.on("end", () => {
-            const buf = Buffer.concat(chunks)
-            try {
-              harvestSigns(token, pathOnly, bodyJson, JSON.parse(buf.toString("utf-8")))
-            } catch {
-              /* 忽略 */
-            }
-            if (!res.headersSent) res.writeHead(status, outHeaders)
-            res.end(buf)
-          })
-          pres.on("error", () => {
-            if (!res.headersSent) res.destroy()
-          })
+        const inspectable =
+          !isDirect && ctype.startsWith("application/json") &&
+          (!clen || clen <= MAX_BUFFER)
+        if (!inspectable) {
+          res.writeHead(status, outHeaders)
+          pres.pipe(res)
           resolve({ retry: false })
           return
         }
 
-        res.writeHead(status, outHeaders)
-        pres.pipe(res)
-        resolve({ retry: false })
+        const chunks: Buffer[] = []
+        pres.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)))
+        pres.on("error", () => {
+          if (!res.headersSent) res.destroy()
+          resolve({ retry: false })
+        })
+        pres.on("end", () => {
+          const buf = Buffer.concat(chunks)
+          let json: unknown = null
+          try {
+            json = JSON.parse(buf.toString("utf-8"))
+          } catch {
+            /* 非 JSON：原样透传 */
+          }
+
+          const code = (json as { code?: unknown } | null)?.code
+          const bodyAuthFail = typeof code === "number" && code === 401
+          if (bodyAuthFail && attempt === 0) {
+            resolve({ retry: true })
+            return
+          }
+
+          if (json) harvestSigns(token, pathOnly, bodyJson, json)
+
+          if (!res.headersSent) res.writeHead(status, outHeaders)
+          res.end(buf)
+          resolve({ retry: false })
+        })
       })
 
       preq.on("error", (err) => {
